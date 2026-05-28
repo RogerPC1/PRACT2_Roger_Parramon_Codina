@@ -1,0 +1,405 @@
+---
+title: "Pràctica2_TiCdVdD"
+author: "Roger Parramon Codina"
+date: "2026-05-27"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r llibreries}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(knitr)
+library(caret)
+library(knitr)
+library(kableExtra)
+library(rsample)
+library(randomForest)
+library(smotefamily)
+library(factoextra)
+library(cluster)
+```
+
+```{r carregar_dataset}
+criptomonedes_dataset_original_path = "C:/Users/Mi Pc/Desktop/UOC/Tipologia i cicle de vida de les dades/Pràctica_2/criptomonedes_dades.csv"
+criptomonedes_dataset_OG = read.csv(criptomonedes_dataset_original_path)
+```
+
+```{r Formateig_funcions}
+formateig_noms <- function(x) {
+  x <- gsub(".USD$", "", as.character(x))
+  return(x)
+}
+
+formateig_estandard <- function(x) {
+  x <- gsub(",", "", as.character(x)) # Eliminar les comes que marquen els milers i compliquen la conversió a numèric
+  x <- gsub("%", "", as.character(x)) # Eliminar els '%', ja sabem que ho són
+  x <- suppressWarnings(as.numeric(x))
+  return(x)
+}
+
+
+formatejar_sufixos <- function(x) {
+  x <- gsub(",", ".", x) # Hi ha comes i punts barrejats fent la mateixa funció
+
+  multiplicador <- c("K" = 1e3, "M" = 1e6, "B" = 1e9, "T" = 1e12) # No m 'ha semblat veure "K", però per si de cas
+  
+  sapply(x, function(val) {
+    sufix <- toupper(substr(val, nchar(val), nchar(val))) # Trobem el sufix
+    
+    if (sufix %in% names(multiplicador)) {
+      part_numerica <-  suppressWarnings(as.numeric(substr(val, 1, nchar(val) - 1)))
+      return(part_numerica * multiplicador[sufix]) # Multipliquem depenent de M, B o T
+    } else {
+      val <-  suppressWarnings(as.numeric(val)) # Convertim a numèric
+      return(val)
+    }
+  }, USE.NAMES = FALSE)
+}
+```
+
+```{r Formateig_basic}
+# Volem eliminar la fila buida, que no serveix de res
+criptomonedes_dataset_tmp1 = criptomonedes_dataset_OG[-c(3), ]
+# Rotar el dataset
+criptomonedes_dataset_tmp2 = as.data.frame(t(criptomonedes_dataset_tmp1))
+colnames(criptomonedes_dataset_tmp2) = criptomonedes_dataset_tmp2[1,]
+criptomonedes_dataset_tmp2 = criptomonedes_dataset_tmp2[-c(1), ]
+rownames(criptomonedes_dataset_tmp2) = c(1:nrow(criptomonedes_dataset_tmp2))
+
+# Cal netejar els noms de les columnes, eliminant espais en blanc i caràcters estranys, per evitar futurs problemes
+names(criptomonedes_dataset_tmp2) <- gsub("%", "Percent", names(criptomonedes_dataset_tmp2))
+names(criptomonedes_dataset_tmp2) <- gsub("52", "FiftyTwo", names(criptomonedes_dataset_tmp2))
+names(criptomonedes_dataset_tmp2) <- gsub("(|)|\\W+", "", names(criptomonedes_dataset_tmp2))
+
+# Netejar els noms de cada criptomoneda - ja sabem que només estan en dòlars dels EUA
+# El símbol no ens cal, ja que funciona com a ID i ja tenim el nom
+criptomonedes_dataset_tmp2$Name <- formateig_noms(criptomonedes_dataset_tmp2$Name)
+criptomonedes_dataset_tmp2 = subset(criptomonedes_dataset_tmp2, select = -c(Symbol))
+# Comprovar que no hi hagi noms repetits
+print("Quantitat de noms únics:")
+print(length(unique(criptomonedes_dataset_tmp2$Name))) # 8452 noms únics de 8584 noms
+# Eliminem la versió que menys MarketCap tingui, que de fet ja està ordenat seguint aquest criteri
+criptomonedes_dataset_tmp2 <- dplyr::distinct(criptomonedes_dataset_tmp2, Name, .keep_all = TRUE)
+
+# Canviar a numèriques les dades rellevants
+# Price
+criptomonedes_dataset_tmp2$Price <- formateig_estandard(criptomonedes_dataset_tmp2$Price)
+
+# Change
+criptomonedes_dataset_tmp2$Change <- formateig_estandard(criptomonedes_dataset_tmp2$Change)
+
+# Change (%)
+criptomonedes_dataset_tmp2$ChangePercent <- formateig_estandard(criptomonedes_dataset_tmp2$ChangePercent)
+
+# Market Cap
+criptomonedes_dataset_tmp2$MarketCap <- formatejar_sufixos(criptomonedes_dataset_tmp2$MarketCap)
+
+# Volume (que a més a més podem simplificar, ja que les 3 són el mateix)
+criptomonedes_dataset_tmp2$Volume <- formatejar_sufixos(criptomonedes_dataset_tmp2$Volume)
+criptomonedes_dataset_tmp2 = subset(criptomonedes_dataset_tmp2, select = -c(VolumeInCurrency24hr,
+                                                                            TotalVolumeAllCurrencies24hr))
+# Circulating Supply
+criptomonedes_dataset_tmp2$CirculatingSupply <- formatejar_sufixos(criptomonedes_dataset_tmp2$CirculatingSupply)
+
+# 52 setmanes (%)
+criptomonedes_dataset_tmp2$FiftyTwoWkChangePercent <- formateig_estandard(criptomonedes_dataset_tmp2$FiftyTwoWkChangePercent)
+
+# Rang 52 setmanes
+criptomonedes_dataset_tmp2$FiftyTwoWkRange <- gsub(",", "", as.character(criptomonedes_dataset_tmp2$FiftyTwoWkRange))
+criptomonedes_dataset_tmp2[c('FiftyTwoWkLowest', 'FiftyTwoWkHighest')] <- str_split_fixed(criptomonedes_dataset_tmp2$FiftyTwoWkRange,
+                                                                                          '\\s',
+                                                                                          2)
+criptomonedes_dataset_tmp2$FiftyTwoWkLowest <- formateig_estandard(criptomonedes_dataset_tmp2$FiftyTwoWkLowest)
+criptomonedes_dataset_tmp2$FiftyTwoWkHighest <- formateig_estandard(criptomonedes_dataset_tmp2$FiftyTwoWkHighest)
+
+criptomonedes_dataset_tmp2 = subset(criptomonedes_dataset_tmp2, select = -c(FiftyTwoWkRange))
+
+#View(criptomonedes_dataset_tmp2)
+```
+
+```{r Dades_existents}
+# Crear change_category, i convertir-ho en factor:
+criptomonedes_dataset_tmp2 <- criptomonedes_dataset_tmp2 %>%
+  mutate(ChangeTrend = case_when(
+    ChangePercent > 0.5   ~ "Positive",
+    ChangePercent >= -0.5 ~ "Neutral",
+    ChangePercent >= -100 ~ "Negative",
+    TRUE                  ~ "EXCEPTION")) # Per sort, sembla ser que no hi ha cap excepció
+
+# Caldria eliminar "ChangePercent" i probablement "Change", ja que es correlacionaria perfectament, o molt bé, amb ChangeTrend
+criptomonedes_dataset_estasis = data.frame(criptomonedes_dataset_tmp2) # en conservem una versió, per a usar ChangePercent a K-Means
+criptomonedes_dataset_tmp2 = subset(criptomonedes_dataset_tmp2, select = -c(ChangePercent, Change))
+
+# Convertir a factor:
+criptomonedes_dataset_tmp2$ChangeTrend = factor(criptomonedes_dataset_tmp2$ChangeTrend, levels = c("Positive",
+                                                                                                   "Neutral",
+                                                                                                   "Negative",
+                                                                                                   "EXCEPTION"))
+
+criptomonedes_dataset_tmp2$ChangeTrend <- droplevels(criptomonedes_dataset_tmp2$ChangeTrend)
+
+```
+
+
+```{r variables_compostes}
+# Afegim un parell de variables compostes
+# Situació actual 52 darreres setmanes (from Price, 52WeekLowest, 52WeekHighest)
+
+criptomonedes_dataset_tmp2 <- criptomonedes_dataset_tmp2 %>%
+  mutate(tmp_week52_range = FiftyTwoWkHighest - FiftyTwoWkLowest,
+         tmp_week52_posicio = (Price - FiftyTwoWkLowest) / tmp_week52_range,
+         FiftyTwoWkCurrentPrice = case_when(tmp_week52_posicio >= 0.80 ~ "Near High",
+                                            tmp_week52_posicio >= 0.50 ~ "Upper Mid",
+                                            tmp_week52_posicio >= 0.20 ~ "Lower Mid",
+                                            TRUE ~ "Near Low")) %>% select(-tmp_week52_range, -tmp_week52_posicio)  # Eliminem les columnes temporals
+# Convertir a factor:
+criptomonedes_dataset_tmp2$FiftyTwoWkCurrentPrice = factor(criptomonedes_dataset_tmp2$FiftyTwoWkCurrentPrice, levels = c("Near High",
+                                                                                                                         "Upper Mid",
+                                                                                                                         "Lower Mid",
+                                                                                                                         "Near Low"))
+
+criptomonedes_dataset_tmp2$FiftyTwoWkCurrentPrice <- droplevels(criptomonedes_dataset_tmp2$FiftyTwoWkCurrentPrice)
+
+
+# Ràtio de Volume i MarketCap (liquiditat) - Convertir en factor!
+criptomonedes_dataset_tmp2 <- criptomonedes_dataset_tmp2 %>%
+  mutate(tmp_vol_mcap_ratio = Volume / MarketCap,
+         LiquidityTier = case_when(tmp_vol_mcap_ratio >= 0.30 ~ "Very High Activity",
+                                    tmp_vol_mcap_ratio >= 0.10 ~ "High Activity",
+                                    tmp_vol_mcap_ratio >= 0.01 ~ "Normal",
+                                    TRUE ~ "Low Liquidity")) %>% select(-tmp_vol_mcap_ratio) # Eliminem les columnes temporals
+# Convertir a factor:
+criptomonedes_dataset_tmp2$LiquidityTier = factor(criptomonedes_dataset_tmp2$LiquidityTier, levels = c("Very High Activity",
+                                                                                                       "High Activity",
+                                                                                                       "Normal",
+                                                                                                       "Low Liquidity"))
+
+criptomonedes_dataset_tmp2$LiquidityTier <- droplevels(criptomonedes_dataset_tmp2$LiquidityTier)
+```
+
+
+```{r netejar_dades}
+# Comprovem quants són:
+criptomonedes_dataset_tmp2 %>% filter(MarketCap == 0 | CirculatingSupply == 0) %>% nrow()
+criptomonedes_dataset_tmp2 %>% filter(MarketCap == 0) %>% nrow()
+criptomonedes_dataset_tmp2 %>% filter(CirculatingSupply == 0) %>% nrow()
+
+criptomonedes_dataset_tmp2 %>% filter(MarketCap == 0 | CirculatingSupply == 0 | Volume == 0 | Price == 0 | FiftyTwoWkLowest == 0) %>% nrow() 
+# És una xifra elevada, amb overlap gairebé total en les dues categories. Val la pena eliminar les dades estranyes
+# Price també té molts valors = 0, però en aquest cas són monedes petites i irrellevants, que potser ens pot ser útil tenir en compte
+
+criptomonedes_dataset_tmp2 <- criptomonedes_dataset_tmp2 %>% filter(Price > 0,
+                                                                    MarketCap > 0,
+                                                                    Volume > 0,
+                                                                    FiftyTwoWkLowest > 0,
+                                                                    CirculatingSupply > 0)
+```
+
+
+```{r netejar_dades}
+
+# Filtrem també el que conserva ChangePercent
+criptomonedes_dataset_estasis <- criptomonedes_dataset_estasis %>% filter(Price > 0,
+                                                                    MarketCap > 0,
+                                                                    Volume > 0,
+                                                                    FiftyTwoWkLowest > 0,
+                                                                    CirculatingSupply > 0)
+```
+```{r Últimes categories}
+# Veient les dades restants, podem fer dues últimes categories
+# Is Tokenized stock/ ETH / BTC
+
+criptomonedes_dataset_tmp2 <- criptomonedes_dataset_tmp2 %>%
+  mutate(ExtraInfo = case_when(grepl("Tokenized\\sStock", Name, ignore.case = TRUE) ~ "Tokenized Stock",
+                               grepl("BTC|Bitcoin", Name, ignore.case = TRUE)       ~ "Bitcoin",
+                               grepl("ETH|Ethereum", Name, ignore.case = TRUE)      ~ "Ethereum",
+                               TRUE ~ "Other"))
+
+criptomonedes_dataset_tmp2$ExtraInfo = factor(criptomonedes_dataset_tmp2$ExtraInfo, levels = c("Bitcoin",
+                                                                                               "Ethereum",
+                                                                                               "Tokenized Stock",
+                                                                                               "Other"))
+criptomonedes_dataset_tmp2$ExtraInfo <- droplevels(criptomonedes_dataset_tmp2$ExtraInfo)
+
+# Nivell de preu Baix = < 2.00, Mitjà entre 2 i 100; Alt > 100
+criptomonedes_dataset_Final <- criptomonedes_dataset_tmp2 %>%
+  mutate(PriceTier = case_when(Price > 100 ~ "High",
+    Price > 2 ~ "Medium",
+    Price > 0 ~ "Low",
+    TRUE      ~ "EXCEPTION")) # Per sort, sembla ser que no hi ha cap excepció
+
+# Convertir a factor:
+criptomonedes_dataset_Final$PriceTier = factor(criptomonedes_dataset_Final$PriceTier, levels = c("High",
+                                                                                               "Medium",
+                                                                                               "Low",
+                                                                                               "EXCEPTION"))
+criptomonedes_dataset_Final$PriceTier <- droplevels(criptomonedes_dataset_Final$PriceTier)
+
+```
+
+```{r Desar_dataset_final}
+criptomonedes_dataset_final_path = "C:/Users/Mi Pc/Desktop/UOC/Tipologia i cicle de vida de les dades/Pràctica_2/criptomonedes_dades_finals.csv"
+write.csv(criptomonedes_dataset_Final, criptomonedes_dataset_final_path)
+```
+
+```{r Visualitzar_dataset_final}
+
+criptomonedes_dataset_Final_visual <- head(criptomonedes_dataset_Final)
+criptomonedes_dataset_mp_path = "C:/Users/Mi Pc/Desktop/UOC/Tipologia i cicle de vida de les dades/Pràctica_2/criptomonedes_dades_tmp.csv"
+write.csv(criptomonedes_dataset_Final_visual, criptomonedes_dataset_mp_path)
+
+criptomonedes_dataset_Final %>%
+  arrange(desc(MarketCap)) %>%
+  head(10) %>%
+  kable(booktabs = TRUE,
+        caption  = "Dades finals- Criptomonedes") %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position", "scale_down"),
+    font_size     = 12
+  ) %>%
+  row_spec(0, bold = TRUE)
+```
+
+
+```{r Random_Forest}
+# Mètode supervisat
+# Bona combinació de les dades numèriques i categóriques
+
+# Separar en train i test
+set.seed(42)
+
+# Convertim les dades tipus factor en numerics, necessari per aplicar SMOTE
+criptomonedes_dataset_encoded = criptomonedes_dataset_Final %>% mutate(across(where(is.factor), as.numeric))
+
+# Separem en testing i training
+criptomonedes_grups <- initial_split(criptomonedes_dataset_encoded, prop = .7)
+criptomonedes_train <- training(criptomonedes_grups)
+criptomonedes_test  <- testing(criptomonedes_grups)
+
+# Separar predictors i objectiu:
+criptomonedes_train_predictors = subset(criptomonedes_train, select = -c(ChangeTrend, Name))
+criptomonedes_train_objectiu = criptomonedes_train$ChangeTrend
+
+criptomonedes_test_predictors = subset(criptomonedes_test, select = -c(ChangeTrend, Name))
+criptomonedes_test_objectiu = criptomonedes_test$ChangeTrend
+```
+
+```{r Preparar_Random_Forest}
+set.seed(42)
+
+# train_encoded <- criptomonedes_train_predictors %>% mutate(across(where(is.factor), as.numeric))
+
+train_SMOTE_df <- cbind(criptomonedes_train_predictors, ChangeTrend = criptomonedes_train_objectiu)
+
+smote_resultat <- SMOTE(
+  X    = train_SMOTE_df[, -ncol(train_SMOTE_df)],
+  target = train_SMOTE_df$ChangeTrend,
+  K    = 5,
+  dup_size = 0)
+
+criptomonedes_train_predictors_balanced <- smote_resultat$data
+table(criptomonedes_train_predictors_balanced$class)
+
+# Arrodonim els valors que són factors
+cat_cols <- c("FiftyTwoWkCurrentPrice", "LiquidityTier", "ExtraInfo", "PriceTier")
+criptomonedes_train_predictors_balanced[cat_cols] <- round(criptomonedes_train_predictors_balanced[cat_cols])
+
+# Descartem un cop més la classe
+criptomonedes_train_predictors = subset(criptomonedes_train_predictors_balanced, select = -c(class))
+
+# Convertir la classe en factor, tant a train com a test:
+criptomonedes_train_objectiu = factor(criptomonedes_train_predictors_balanced$class, levels = c("1",
+                                                                                                "2",
+                                                                                                "3"))
+
+criptomonedes_test_objectiu = factor(criptomonedes_test_objectiu, levels = c("1",
+                                                                             "2",
+                                                                             "3"))
+```
+
+```{r Aplicar_RF}
+set.seed(42)
+
+Model_BoscAleatori <- randomForest(x = criptomonedes_train_predictors,
+                   y = criptomonedes_train_objectiu,
+                   ntree = 500,
+                   importance = TRUE,
+                   mtry = 6)
+
+print(Model_BoscAleatori)
+varImpPlot(Model_BoscAleatori)
+plot(Model_BoscAleatori)
+
+print("###############")
+# Aplicar el model sobre test
+prediccions_criptomonedes_test <- predict(Model_BoscAleatori, newdata = criptomonedes_test_predictors)
+
+confusionMatrix(data = prediccions_criptomonedes_test,
+                reference = criptomonedes_test_objectiu)
+```
+
+```{r Represetar_matrius_confusió}
+# Build a plottable dataframe
+matriu_confusio_criptomonedes_test <- confusionMatrix(prediccions_criptomonedes_test, criptomonedes_test_objectiu)
+matriu_confusio_criptomonedes_test_taula <- as.data.frame(matriu_confusio_criptomonedes_test$table)
+
+ggplot(matriu_confusio_criptomonedes_test_taula, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 5) +
+  scale_fill_gradient(low = "steelblue", high = "darkblue") +
+  labs(title = "Matriu de confusió — Criptomonedes Random Forest") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r K-Means}
+# Mètode no-supervisat
+
+set.seed(42)
+
+# Seleccionem només numèrics
+criptomonedes_cols_numeric <- criptomonedes_dataset_Final %>% select(where(is.numeric))
+criptomonedes_cols_numeric$ChangePercent <- criptomonedes_dataset_estasis$ChangePercent
+
+cols_to_log    <- c("Price", "MarketCap", "Volume", "CirculatingSupply", "FiftyTwoWkLowest", "FiftyTwoWkHighest")
+cols_to_keep   <- c("FiftyTwoWkChangePercent", "ChangePercent")
+
+criptomonedes_cols_clean <- criptomonedes_cols_numeric %>%
+  mutate(across(all_of(cols_to_log), log1p)) %>%
+  mutate(across(all_of(cols_to_keep), scale))
+
+criptomonedes_cols_scaled <- scale(criptomonedes_cols_clean)
+
+# Normalitzar amb log les dades abans:
+criptomonedes_cols_scaled <- scale(criptomonedes_cols_numeric)
+
+
+wss <- sapply(1:20, function(k) {
+  kmeans(criptomonedes_cols_scaled, centers = k, nstart = 25)$tot.withinss
+})
+
+plot(1:20, wss, type = "b",
+     xlab = "Nombre de clústers (k)",
+     ylab = "Mostres dins de cada clúster",
+     main = "Mètode del colze")
+
+
+kmeans.re <- kmeans(criptomonedes_cols_scaled, iter.max = 500, centers = 6, nstart = 5)
+kmeans.re
+
+
+table(kmeans.re$cluster)
+
+cm <- table(criptomonedes_dataset_Final$ChangeTrend, kmeans.re$cluster)
+cm
+
+fviz_cluster(kmeans.re, data = criptomonedes_cols_scaled, 
+main = "K-Means Clusters")
+```
